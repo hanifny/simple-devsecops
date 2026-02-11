@@ -1,0 +1,103 @@
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  # 1. Unit Test (pytest)
+  unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r dev-requirements.txt
+      - name: Run Tests
+        run: pytest
+
+  # 2. SAST (Bandit)
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install Bandit
+        run: pip install bandit
+      - name: Run Bandit Scan
+        # Scan recursive (-r) dan lapor hanya issue medium/high (-ll)
+        run: bandit -r . -ll
+
+  # 3. SCA (pip-audit)
+  sca:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install pip-audit
+        run: pip install pip-audit
+      - name: Run Dependency Scan
+        # Pastikan requirements.txt sudah diupdate agar tidak error
+        run: pip-audit -r requirements.txt
+
+  # 4. Secret Scan (Gitleaks)
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 5. Build & Push Docker Image
+  build-push:
+    runs-on: ubuntu-latest
+    # Job ini hanya jalan jika security & test lulus
+    needs: [unit-test, sast, sca, secret-scan]
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          # Tag latest dan commit SHA
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/notes-app:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/notes-app:${{ github.sha }}
+
+  # 6. Image Scan (Trivy) dari Docker Hub
+  image-scan:
+    runs-on: ubuntu-latest
+    needs: build-push
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ secrets.DOCKERHUB_USERNAME }}/notes-app:latest'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
